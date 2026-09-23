@@ -1,0 +1,29 @@
+name: Run V8 Order Flow Bot
+
+on:
+  schedule:
+    # Dar 5 minute e bot automatic run thase
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # Manual run karva mate
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/python- Someone
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests numpy
+
+      - name: Run Order Flow Engine
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python main.py
