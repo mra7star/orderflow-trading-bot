@@ -2,19 +2,19 @@ name: Run V8 Order Flow Bot
 
 on:
   schedule:
-    # Dar 5 minute e bot automatic run thase
     - cron: '*/5 * * * *'
-  workflow_dispatch: # Manual run karva mate
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/python- Someone
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
