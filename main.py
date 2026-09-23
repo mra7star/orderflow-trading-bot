@@ -1,53 +1,93 @@
 import os
 import time
+import hmac
+import hashlib
 import requests
 import numpy as np
+from datetime import datetime, timezone, timedelta
 
-# === CONFIGURATION & SECURITY ===
-# Webhook URL GitHub Secrets / Environment Variable se secure tareeqe se load hoga
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+# === CONFIGURATION ===
+# GitHub Secrets se secure tareeqay se uthayega
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+
+# MEXC Futures Demo API Credentials (Apni keys yahan dalein ya secrets use karein)
+MEXC_API_KEY = "YAHAN_APNI_MEXC_API_KEY_DALIN"
+MEXC_SECRET_KEY = "YAHAN_APNA_MEXC_SECRET_KEY_DALIN"
+MEXC_BASE_URL = "https://contract.mexc.com"
 
 HYPERLIQUID_API_URL = "https://api.hyperliquid.xyz/info"
 BINANCE_FUTURES_URL = "https://fapi.binance.com/fapi/v1/trades"
 
-# Side-Wise Alert Cooldown (Deduplication)
+# Side-Wise Alert Cooldown
 ALERT_COOLDOWN = {}
 COOLDOWN_TIME = 900  # 15 minutes per side per coin
 
-# Risk & Fee Constants
+# Taker Fees & Slippage Constants
 TAKER_FEE = 0.00035
 SLIPPAGE_EST = 0.0005
 
 
 def send_discord_alert(msg):
     if not DISCORD_WEBHOOK_URL:
-        print("⚠️ Warning: DISCORD_WEBHOOK_URL missing in environment variables.")
+        print("Webhook Error: DISCORD_WEBHOOK_URL environment variable missing.")
         return
     payload = {"content": msg}
     try:
-        res = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
-        if res.status_code in [200, 204]:
-            print("✅ Discord Alert sent successfully!")
-        else:
-            print(f"⚠️ Discord Webhook Error Status: {res.status_code}")
+        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
     except Exception as e:
-        print(f"❌ Webhook Exception: {e}")
+        print(f"Webhook Error: {e}")
 
 
-def map_to_binance_symbol(hl_coin):
-    """Maps Hyperliquid coin names to standard Binance Futures trading pairs"""
-    if hl_coin.startswith("k"):
-        # e.g. kPEPE -> 1000PEPEUSDT, kBONK -> 1000BONKUSDT
-        return f"1000{hl_coin[1:]}USDT"
-    return f"{hl_coin}USDT"
+def place_mexc_demo_order(symbol, side, size_usdt, entry_price, sl_price, tp_price):
+    """MEXC Futures Demo/Testnet par automatic trade execute karne ka function"""
+    if "YAHAN" in MEXC_API_KEY:
+        print("⚠️ MEXC API Keys not configured yet. Skipping auto-trade execution.")
+        return False
+
+    endpoint = "/api/v1/private/order/submit"
+    timestamp = str(int(time.time() * 1000))
+    mexc_symbol = f"{symbol}_USDT"
+    contract_size = round(size_usdt / entry_price, 2)
+    op_type = 1 if side == "LONG" else 3
+    
+    params = {
+        "symbol": mexc_symbol,
+        "price": entry_price,
+        "vol": contract_size,
+        "side": op_type,
+        "type": 5,
+        "openType": 1,
+        "leverage": 10
+    }
+    
+    query_string = f"accessKey={MEXC_API_KEY}&reqTime={timestamp}"
+    signature = hmac.new(MEXC_SECRET_KEY.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+    
+    headers = {
+        "ApiKey": MEXC_API_KEY,
+        "Request-Time": timestamp,
+        "Signature": signature,
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        res = requests.post(MEXC_BASE_URL + endpoint, json=params, headers=headers, timeout=5).json()
+        if res.get("success"):
+            print(f"✅ MEXC Demo Trade Executed Successfully for {symbol} {side}!")
+            return True
+        else:
+            print(f"❌ MEXC Order Failed: {res}")
+            return False
+    except Exception as e:
+        print(f"❌ MEXC Connection Error: {e}")
+        return False
 
 
 def fetch_market_context():
     try:
         res = requests.post(HYPERLIQUID_API_URL, json={"type": "metaAndAssetCtxs"}, timeout=5)
         return res.json()
-    except Exception as e:
-        print(f"Error fetching market context: {e}")
+    except Exception:
         return None
 
 
@@ -93,9 +133,8 @@ def fetch_binance_cross_delta(symbol):
     try:
         params = {"symbol": symbol, "limit": 100}
         res = requests.get(BINANCE_FUTURES_URL, params=params, timeout=3).json()
-
         if not isinstance(res, list):
-            return 0.0, True  # Failover guard if rate limited
+            return 0.0, True
 
         buyer_vol = 0.0
         seller_vol = 0.0
@@ -115,8 +154,7 @@ def fetch_binance_cross_delta(symbol):
         if total_vol == 0:
             return 0.0, False
 
-        binance_net_delta = buyer_vol - seller_vol
-        return binance_net_delta, True
+        return buyer_vol - seller_vol, True
     except Exception:
         return 0.0, True
 
@@ -130,9 +168,7 @@ def fetch_anti_spoof_dom_depth(coin, samples=3, delay=0.15):
             res = requests.post(HYPERLIQUID_API_URL, json={"type": "l2Book", "coin": coin}, timeout=5).json()
             bids = res.get("levels", [[], []])[0]
             asks = res.get("levels", [[], []])[1]
-
-            last_raw_bids = bids
-            last_raw_asks = asks
+            last_raw_bids, last_raw_asks = bids, asks
 
             bid_vol = sum(float(b["sz"]) * float(b["px"]) for b in bids[:10])
             ask_vol = sum(float(a["sz"]) * float(a["px"]) for a in asks[:10])
@@ -148,14 +184,12 @@ def fetch_anti_spoof_dom_depth(coin, samples=3, delay=0.15):
 
     real_bid_depth = float(np.median(bid_depths))
     real_ask_depth = float(np.median(ask_depths))
-
     dom_ratio = real_bid_depth / real_ask_depth if real_ask_depth > 0 else 1.0
     return dom_ratio, real_bid_depth, real_ask_depth, last_raw_bids, last_raw_asks
 
 
 def calculate_anti_sweep_sl(entry_price, side, atr, bid_levels, ask_levels):
     base_buffer = 1.8 * atr
-
     if side == "LONG":
         dense_bid_price = entry_price - base_buffer
         if bid_levels:
@@ -163,7 +197,6 @@ def calculate_anti_sweep_sl(entry_price, side, atr, bid_levels, ask_levels):
             wall_price = float(max_bid["px"])
             dense_bid_price = min(entry_price - (1.2 * atr), wall_price - (0.3 * atr))
         return dense_bid_price
-
     elif side == "SHORT":
         dense_ask_price = entry_price + base_buffer
         if ask_levels:
@@ -190,7 +223,6 @@ def calculate_atr(candles, period=14):
     highs = np.array([float(c["h"]) for c in candles])
     lows = np.array([float(c["l"]) for c in candles])
     closes = np.array([float(c["c"]) for c in candles])
-
     tr1 = highs[1:] - lows[1:]
     tr2 = np.abs(highs[1:] - closes[:-1])
     tr3 = np.abs(lows[1:] - closes[:-1])
@@ -224,13 +256,13 @@ def analyze_v8_orderflow_engine():
         open_interest = float(ctx.get("openInterest", 0))
         funding = float(ctx.get("funding", 0))
 
-        if day_vol < 15000000:  # $15M Volume Filter
+        if day_vol < 15000000:
             continue
 
         net_delta, delta_pct, footprint_imbalance = fetch_recent_trades_tape(coin)
-        binance_pair = map_to_binance_symbol(coin)
-        binance_delta, binance_ok = fetch_binance_cross_delta(binance_pair)
-        dom_ratio, real_bids, real_asks, raw_bids, raw_asks = fetch_anti_spoof_dom_depth(coin, samples=3, delay=0.1)
+        binance_pair = f"{coin}USDT"
+        binance_delta, _ = fetch_binance_cross_delta(binance_pair)
+        dom_ratio, _, _, raw_bids, raw_asks = fetch_anti_spoof_dom_depth(coin, samples=3, delay=0.1)
 
         candles = fetch_candles(coin, "5m", count=50)
         if not candles or len(candles) < 30:
@@ -242,7 +274,10 @@ def analyze_v8_orderflow_engine():
         allow_long = funding < 0.0005
         allow_short = funding > -0.0005
 
-        # LONG TRIGGER
+        pkt_zone = timezone(timedelta(hours=5))
+        pkt_time_str = datetime.now(pkt_zone).strftime("%d-%b-%Y %I:%M:%S %p")
+
+        # 🟢 LONG SETUP
         if allow_long and footprint_imbalance and delta_pct > 0.12 and dom_ratio > 1.35 and binance_delta > 0:
             if check_side_cooldown(coin, "LONG", current_time):
                 sl = calculate_anti_sweep_sl(current_price, "LONG", atr, raw_bids, raw_asks)
@@ -254,20 +289,18 @@ def analyze_v8_orderflow_engine():
 
                 if net_rr >= 1.8:
                     ALERT_COOLDOWN[f"{coin}_LONG"] = current_time
+                    
                     alert = (
-                        f"⚡ **LEVEL-3 ORDER FLOW ULTRA LONG (V8)** ⚡\n\n"
+                        f"⚡ **LEVEL-3 ORDER FLOW ULTRA LONG (MEXC AUTO)** ⚡\n\n"
+                        f"🕒 **Time (PKT):** `{pkt_time_str}`\n"
                         f"🪙 **Coin:** `{coin}`\n"
-                        f"💵 **Entry:** `${current_price:.4f}`\n"
-                        f"🛑 **Anti-Sweep SL:** `${sl:.4f}` | 🎯 **TP:** `${tp:.4f}`\n\n"
-                        f"📊 **Cross-Venue Order Flow Metrics:**\n"
-                        f"• Hyperliquid Delta: `${net_delta:+,.2f}` (`{delta_pct*100:+.1f}%` Dominance)\n"
-                        f"• Binance Futures Delta: `${binance_delta:+,.2f}` (Aligned ✅)\n"
-                        f"• Anti-Spoof DOM Ratio: `{dom_ratio:.2f}x` Real Bids\n"
-                        f"• Open Interest: `{open_interest:,.0f}` | Funding: `{funding:.6f}`"
+                        f"💵 **Entry Price:** `${current_price:.4f}`\n"
+                        f"🛑 **Anti-Sweep SL:** `${sl:.4f}` | 🎯 **TP:** `${tp:.4f}`"
                     )
                     send_discord_alert(alert)
+                    place_mexc_demo_order(coin, "LONG", 50.0, current_price, sl, tp)
 
-        # SHORT TRIGGER
+        # 🔴 SHORT SETUP
         elif allow_short and footprint_imbalance and delta_pct < -0.12 and dom_ratio < 0.75 and binance_delta < 0:
             if check_side_cooldown(coin, "SHORT", current_time):
                 sl = calculate_anti_sweep_sl(current_price, "SHORT", atr, raw_bids, raw_asks)
@@ -279,25 +312,22 @@ def analyze_v8_orderflow_engine():
 
                 if net_rr >= 1.8:
                     ALERT_COOLDOWN[f"{coin}_SHORT"] = current_time
+                    
                     alert = (
-                        f"⚡ **LEVEL-3 ORDER FLOW ULTRA SHORT (V8)** ⚡\n\n"
+                        f"⚡ **LEVEL-3 ORDER FLOW ULTRA SHORT (MEXC AUTO)** ⚡\n\n"
+                        f"🕒 **Time (PKT):** `{pkt_time_str}`\n"
                         f"🪙 **Coin:** `{coin}`\n"
-                        f"💵 **Entry:** `${current_price:.4f}`\n"
-                        f"🛑 **Anti-Sweep SL:** `${sl:.4f}` | 🎯 **TP:** `${tp:.4f}`\n\n"
-                        f"📊 **Cross-Venue Order Flow Metrics:**\n"
-                        f"• Hyperliquid Delta: `${net_delta:+,.2f}` (`{delta_pct*100:+.1f}%` Dominance)\n"
-                        f"• Binance Futures Delta: `${binance_delta:+,.2f}` (Aligned ✅)\n"
-                        f"• Anti-Spoof DOM Ratio: `{dom_ratio:.2f}x` Real Asks\n"
-                        f"• Open Interest: `{open_interest:,.0f}` | Funding: `{funding:.6f}`"
+                        f"💵 **Entry Price:** `${current_price:.4f}`\n"
+                        f"🛑 **Anti-Sweep SL:** `${sl:.4f}` | 🎯 **TP:** `${tp:.4f}`"
                     )
                     send_discord_alert(alert)
+                    place_mexc_demo_order(coin, "SHORT", 50.0, current_price, sl, tp)
 
 
 if __name__ == "__main__":
-    print("🚀 V8 Level-3 Order Flow Engine Running (Cross-Venue Binance + Orderbook Protection)...")
-    while True:
-        try:
-            analyze_v8_orderflow_engine()
-        except Exception as e:
-            print(f"Error in main loop: {e}")
-        time.sleep(15)
+    print("🚀 V8 Level-3 Order Flow Engine Running...")
+    try:
+        analyze_v8_orderflow_engine()
+        print("✅ Scan Cycle Complete!")
+    except Exception as e:
+        print(f"Error in execution: {e}")
